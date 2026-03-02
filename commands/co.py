@@ -569,7 +569,7 @@ async def co_handler(msg: Message):
         hit_card = charged_card['card']
         response = (
             f"<blockquote><code>𝗛𝗜𝗧 𝗖𝗛𝗔𝗥𝗚𝗘𝗗 😎</code></blockquote>\n"
-            f"<blockquote><code>「 𝗦𝘁𝗿𝗶𝗽𝗲 𝗖𝗵𝗮𝗿𝗴𝗲 {price_str} 」 💸</code></blockquote>\n\n"
+            f"<blockquote><code>「 𝗦𝘁𝗿𝗶𝗽𝗲 𝗖𝗵𝗮𝗿𝗴𝗲 {price_str} 」 ✅</code></blockquote>\n\n"
             f"<blockquote>"
             f"「❃」 𝗣𝗿𝗼𝘅𝘆 : <code>{proxy_display}</code>\n"
             f"「❃」 𝗠𝗲𝗿𝗰𝗵𝗮𝗻𝘁 : <code>{checkout_data['merchant'] or 'N/A'}</code>\n"
@@ -634,18 +634,34 @@ async def co_handler(msg: Message):
             print(f"[DEBUG] Admin notif failed: {str(e)[:50]}")
 
     else:
-        # ━━━ NO HIT — Show compact summary ━━━
+        # ━━━ NO HIT — Show compact summary with reason ━━━
+
+        # Determine WHY charging stopped
+        session_expired = any(r['status'] == 'SESSION_EXPIRED' for r in results)
+        last_result = results[-1] if results else None
+
         if cancelled:
-            header = "「 𝗖𝗵𝗲𝗰𝗸𝗼𝘂𝘁 𝗖𝗮𝗻𝗰𝗲𝗹𝗹𝗲𝗱 ⛔ 」"
+            header = "「 𝗦𝗲𝘀𝘀𝗶𝗼𝗻 𝗖𝗮𝗻𝗰𝗲𝗹𝗹𝗲𝗱 ⛔ 」"
+            stop_reason = "Checkout session is no longer active"
+        elif session_expired:
+            header = "「 𝗦𝗲𝘀𝘀𝗶𝗼𝗻 𝗘𝘅𝗽𝗶𝗿𝗲𝗱 ⏰ 」"
+            # Get the actual error message from the expired result
+            expired_result = next((r for r in results if r['status'] == 'SESSION_EXPIRED'), None)
+            stop_reason = expired_result['response'] if expired_result else "Checkout session has expired"
+        elif len(results) >= len(cards):
+            header = f"「 𝗡𝗼 𝗛𝗶𝘁 — {price_str} 」"
+            stop_reason = "All cards processed, no successful charge"
         else:
             header = f"「 𝗦𝘁𝗿𝗶𝗽𝗲 𝗖𝗵𝗮𝗿𝗴𝗲 {price_str} 」"
+            stop_reason = "Charging stopped"
 
         response = (
             f"<blockquote><code>{header}</code></blockquote>\n\n"
             f"<blockquote>"
             f"「❃」 𝗣𝗿𝗼𝘅𝘆 : <code>{proxy_display}</code>\n"
             f"「❃」 𝗠𝗲𝗿𝗰𝗵𝗮𝗻𝘁 : <code>{checkout_data['merchant'] or 'N/A'}</code>\n"
-            f"「❃」 𝗣𝗿𝗼𝗱𝘂𝗰𝘁 : <code>{checkout_data['product'] or 'N/A'}</code>"
+            f"「❃」 𝗣𝗿𝗼𝗱𝘂𝗰𝘁 : <code>{checkout_data['product'] or 'N/A'}</code>\n"
+            f"「❃」 𝗦𝘁𝗮𝘁𝘂𝘀 : <code>{stop_reason}</code>"
             f"</blockquote>\n\n"
         )
 
