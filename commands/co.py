@@ -1,6 +1,7 @@
 import time
 import re
 import asyncio
+import random
 from aiogram import Router
 from aiogram.types import Message
 from aiogram.filters import Command
@@ -513,6 +514,10 @@ async def co_handler(msg: Message):
     print(f"[DEBUG] Session: TLS={session_ctx['tls_profile']}, guid={session_ctx['fingerprints']['guid'][:8]}...")
 
     for i, card in enumerate(cards):
+        # Random delay between cards (1.5–3.5s) to mimic human behavior
+        if i > 0:
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+
         if len(cards) > 1 and i > 0 and i % check_interval == 0:
             is_active = await check_checkout_active(checkout_data['pk'], checkout_data['cs'])
             if not is_active:
