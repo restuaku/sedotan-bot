@@ -116,85 +116,140 @@ def get_headers(stripe_js: bool = False) -> dict:
 
 import hashlib
 import aiohttp
+import time as _time
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Real Stripe.js hash scraping from CDN
+#  Auto-refreshes every 3 hours (TTL)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_STRIPE_HASH_TTL = 3 * 60 * 60  # 3 jam dalam detik
+
 _cached_stripe_hashes = {
     "core": None,     # stripe.js main bundle hash
     "v3": None,       # stripe-js-v3 module hash
-    "fetched": False, # whether we've attempted fetch
+    "fetched_at": 0,  # timestamp terakhir fetch (epoch seconds)
 }
+_stripe_hash_lock = None  # asyncio.Lock, lazy init
 
 
-async def fetch_stripe_js_hashes():
+def _is_hash_stale() -> bool:
+    """Check apakah hash sudah expired (lebih dari 3 jam)."""
+    if not _cached_stripe_hashes["core"]:
+        return True  # Belum pernah fetch
+    elapsed = _time.time() - _cached_stripe_hashes["fetched_at"]
+    return elapsed >= _STRIPE_HASH_TTL
+
+
+async def _get_hash_lock():
+    """Lazy init asyncio.Lock (harus di dalam event loop)."""
+    global _stripe_hash_lock
+    if _stripe_hash_lock is None:
+        _stripe_hash_lock = asyncio.Lock()
+    return _stripe_hash_lock
+
+
+async def fetch_stripe_js_hashes(force: bool = False):
     """Fetch real Stripe.js from CDN and extract build hashes.
     
-    Should be called once at bot startup. Extracts fingerprint hashes
-    from the webpack bundle's 'fingerprinted/js/' asset paths, which
-    are the same hashes Stripe uses to identify legitimate JS clients.
+    Auto-refreshes setiap 3 jam. Bisa dipanggil berkali-kali — 
+    hanya fetch ulang jika TTL expired atau force=True.
+    
+    Extracts fingerprint hashes from the webpack bundle's 
+    'fingerprinted/js/' asset paths, which are the same hashes 
+    Stripe uses to identify legitimate JS clients.
     """
     global _cached_stripe_hashes
     
-    if _cached_stripe_hashes["fetched"]:
+    # Skip jika hash masih fresh (belum expired)
+    if not force and not _is_hash_stale():
         return
     
-    _cached_stripe_hashes["fetched"] = True
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://js.stripe.com/v3/",
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    "Accept": "*/*",
-                },
-                timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    print(f"[DEBUG] Stripe.js fetch failed: HTTP {resp.status}")
-                    return
-                
-                content = await resp.text()
-                
-                # Extract fingerprint hashes from the webpack bundle
-                # Real Stripe.js contains paths like: fingerprinted/js/MODULE-HASH.js
-                js_hashes = re.findall(
-                    r'fingerprinted/js/[a-zA-Z0-9_-]+-([a-f0-9]{20,40})\.js',
-                    content
-                )
-                
-                if js_hashes:
-                    # Use first two distinct hashes for core and v3
-                    unique_hashes = list(dict.fromkeys(js_hashes))
-                    _cached_stripe_hashes["core"] = unique_hashes[0][:10]
-                    if len(unique_hashes) > 1:
-                        _cached_stripe_hashes["v3"] = unique_hashes[1][:10]
+    # Prevent concurrent fetches
+    lock = await _get_hash_lock()
+    async with lock:
+        # Double-check setelah acquire lock
+        if not force and not _is_hash_stale():
+            return
+        
+        old_core = _cached_stripe_hashes.get("core")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://js.stripe.com/v3/",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    ssl=False,
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"[DEBUG] Stripe.js fetch failed: HTTP {resp.status}")
+                        # Jangan reset fetched_at agar retry lagi nanti
+                        return
+                    
+                    content = await resp.text()
+                    
+                    # Extract fingerprint hashes from the webpack bundle
+                    # Real Stripe.js contains paths like: fingerprinted/js/MODULE-HASH.js
+                    js_hashes = re.findall(
+                        r'fingerprinted/js/[a-zA-Z0-9_-]+-([a-f0-9]{20,40})\.js',
+                        content
+                    )
+                    
+                    if js_hashes:
+                        # Use first two distinct hashes for core and v3
+                        unique_hashes = list(dict.fromkeys(js_hashes))
+                        _cached_stripe_hashes["core"] = unique_hashes[0][:10]
+                        if len(unique_hashes) > 1:
+                            _cached_stripe_hashes["v3"] = unique_hashes[1][:10]
+                        else:
+                            _cached_stripe_hashes["v3"] = unique_hashes[0][:10]
+                        _cached_stripe_hashes["fetched_at"] = _time.time()
+                        
+                        changed = old_core != _cached_stripe_hashes["core"]
+                        status = "🔄 UPDATED" if (old_core and changed) else "✅ Fetched"
+                        print(f"[DEBUG] {status} Stripe.js hashes: "
+                              f"core={_cached_stripe_hashes['core']}, "
+                              f"v3={_cached_stripe_hashes['v3']} "
+                              f"(from {len(unique_hashes)} unique hashes, "
+                              f"TTL={_STRIPE_HASH_TTL//3600}h)")
                     else:
-                        _cached_stripe_hashes["v3"] = unique_hashes[0][:10]
-                    
-                    print(f"[DEBUG] ✅ Stripe.js real hashes scraped: "
-                          f"core={_cached_stripe_hashes['core']}, "
-                          f"v3={_cached_stripe_hashes['v3']} "
-                          f"(from {len(unique_hashes)} unique hashes)")
-                else:
-                    # Fallback: derive hash from content itself
-                    content_hash = hashlib.sha256(content.encode()).hexdigest()
-                    _cached_stripe_hashes["core"] = content_hash[:10]
-                    _cached_stripe_hashes["v3"] = content_hash[10:20]
-                    print(f"[DEBUG] ⚠️ No fingerprint paths found, using content hash: "
-                          f"core={_cached_stripe_hashes['core']}, "
-                          f"v3={_cached_stripe_hashes['v3']}")
-                    
-    except Exception as e:
-        print(f"[DEBUG] ❌ Stripe.js hash fetch error: {str(e)[:80]}")
+                        # Fallback: derive hash from content itself
+                        content_hash = hashlib.sha256(content.encode()).hexdigest()
+                        _cached_stripe_hashes["core"] = content_hash[:10]
+                        _cached_stripe_hashes["v3"] = content_hash[10:20]
+                        _cached_stripe_hashes["fetched_at"] = _time.time()
+                        print(f"[DEBUG] ⚠️ No fingerprint paths found, using content hash: "
+                              f"core={_cached_stripe_hashes['core']}, "
+                              f"v3={_cached_stripe_hashes['v3']}")
+                        
+        except Exception as e:
+            print(f"[DEBUG] ❌ Stripe.js hash fetch error: {str(e)[:80]}")
+            # Jika sudah punya hash lama, tetap pakai — jangan kosongkan
+            # Hanya set fetched_at mundur sedikit agar retry lebih cepat (30 menit)
+            if _cached_stripe_hashes["core"]:
+                _cached_stripe_hashes["fetched_at"] = _time.time() - _STRIPE_HASH_TTL + 1800
+                print(f"[DEBUG] ⚠️ Keeping old hashes, retry in ~30min")
 
 
 def get_random_stripe_js_agent() -> str:
-    """Get Stripe.js payment_user_agent using real CDN hashes when available."""
+    """Get Stripe.js payment_user_agent using real CDN hashes when available.
+    
+    Jika hash sudah stale, akan trigger background refresh pada call berikutnya.
+    """
     core = _cached_stripe_hashes.get("core")
     v3 = _cached_stripe_hashes.get("v3")
+    
+    # Schedule background refresh jika stale (non-blocking)
+    if _is_hash_stale():
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(fetch_stripe_js_hashes())
+            print(f"[DEBUG] 🔄 Stripe.js hash refresh scheduled (TTL expired)")
+        except RuntimeError:
+            pass  # No event loop — will be refreshed on next async call
     
     if not core or not v3:
         # Last resort fallback — should rarely happen if fetch_stripe_js_hashes() was called
