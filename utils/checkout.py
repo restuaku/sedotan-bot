@@ -74,6 +74,12 @@ async def decode_pk_from_url(url: str) -> dict:
         if cs_match:
             result["cs"] = cs_match.group(0)
 
+        # Payment Page URLs use ppage_ instead of cs_
+        if not result["cs"]:
+            pp_match = re.search(r'ppage_[A-Za-z0-9]+', url)
+            if pp_match:
+                result["cs"] = pp_match.group(0)
+
         # Method 1: Decode from hash fragment (XOR decode)
         if '#' in url:
             hash_part = url.split('#')[1]
